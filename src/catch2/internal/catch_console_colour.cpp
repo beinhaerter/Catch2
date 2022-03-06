@@ -24,20 +24,15 @@
 #include <ostream>
 
 namespace Catch {
+
+    ColourImpl::~ColourImpl() = default;
+
     namespace {
-
-        struct IColourImpl {
-            virtual ~IColourImpl() = default;
-            virtual void use( Colour::Code _colourCode ) = 0;
-        };
-
-        struct NoColourImpl : IColourImpl {
+        //! A do-nothing implementation of colour, used as fallback for unknown
+        //! platforms, and when the user asks to deactivate all colours.
+        struct NoColourImpl : ColourImpl {
             void use( Colour::Code ) override {}
-
-            static IColourImpl* instance() {
-                static NoColourImpl s_instance;
-                return &s_instance;
-            }
+            static bool useColourOnPlatform() { return true; }
         };
 
     } // anon namespace
@@ -57,7 +52,7 @@ namespace Catch {
 namespace Catch {
 namespace {
 
-    class Win32ColourImpl : public IColourImpl {
+    class Win32ColourImpl : public ColourImpl {
     public:
         Win32ColourImpl() {
             CONSOLE_SCREEN_BUFFER_INFO csbiInfo;
@@ -91,6 +86,8 @@ namespace {
             }
         }
 
+        static bool useColourOnPlatform() { return true; }
+
     private:
         void setTextAttribute( WORD _textAttribute ) {
             SetConsoleTextAttribute( GetStdHandle( STD_OUTPUT_HANDLE ),
@@ -100,19 +97,6 @@ namespace {
         WORD originalForegroundAttributes;
         WORD originalBackgroundAttributes;
     };
-
-    IColourImpl* platformColourInstance() {
-        static Win32ColourImpl s_instance;
-
-        auto const* config = getCurrentContext().getConfig();
-        UseColour colourMode = config?
-            config->useColour() : UseColour::Auto;
-        if( colourMode == UseColour::Auto )
-            colourMode = UseColour::Yes;
-        return colourMode == UseColour::Yes
-            ? &s_instance
-            : NoColourImpl::instance();
-    }
 
 } // end anon namespace
 } // end namespace Catch
@@ -128,7 +112,7 @@ namespace {
     // Thanks to Adam Strzelecki for original contribution
     // (http://github.com/nanoant)
     // https://github.com/philsquared/Catch/pull/131
-    class PosixColourImpl : public IColourImpl {
+    class PosixColourImpl : public ColourImpl {
     public:
         void use( Colour::Code _colourCode ) override {
             switch( _colourCode ) {
@@ -151,9 +135,22 @@ namespace {
                 default: CATCH_INTERNAL_ERROR( "Unknown colour requested" );
             }
         }
-        static IColourImpl* instance() {
+        static ColourImpl* instance() {
             static PosixColourImpl s_instance;
             return &s_instance;
+        }
+
+        static bool useColourOnPlatform() {
+            return
+#    if defined( CATCH_PLATFORM_MAC ) || defined( CATCH_PLATFORM_IPHONE )
+                !isDebuggerActive() &&
+#    endif
+#    if !( defined( __DJGPP__ ) && defined( __STRICT_ANSI__ ) )
+                isatty( STDOUT_FILENO )
+#    else
+                false
+#    endif
+                    ;
         }
 
     private:
@@ -165,19 +162,7 @@ namespace {
         }
     };
 
-    bool useColourOnPlatform() {
-        return
-#if defined(CATCH_PLATFORM_MAC) || defined(CATCH_PLATFORM_IPHONE)
-            !isDebuggerActive() &&
-#endif
-#if !(defined(__DJGPP__) && defined(__STRICT_ANSI__))
-            isatty(STDOUT_FILENO)
-#else
-            false
-#endif
-            ;
-    }
-    IColourImpl* platformColourInstance() {
+    ColourImpl* platformColourInstance() {
         ErrnoGuard guard;
         auto const* config = getCurrentContext().getConfig();
         UseColour colourMode = config
@@ -199,7 +184,7 @@ namespace {
 
 namespace Catch {
 
-    static IColourImpl* platformColourInstance() { return NoColourImpl::instance(); }
+    static ColourImpl* platformColourInstance() { return NoColourImpl::instance(); }
 
 } // end namespace Catch
 
@@ -221,7 +206,7 @@ namespace Catch {
     Colour::~Colour(){ if( !m_moved ) use( None ); }
 
     void Colour::use( Code _colourCode ) {
-        static IColourImpl* impl = platformColourInstance();
+        static ColourImpl* impl = platformColourInstance();
         // Strictly speaking, this cannot possibly happen.
         // However, under some conditions it does happen (see #1626),
         // and this change is small enough that we can let practicality
@@ -234,6 +219,45 @@ namespace Catch {
     std::ostream& operator << ( std::ostream& os, Colour const& ) {
         return os;
     }
+
+    Detail::unique_ptr<ColourImpl> makeColourImpl() {
+        auto const* config = getCurrentContext().getConfig();
+        UseColour colourMode = config ? config->useColour() : UseColour::Auto;
+
+        bool createPlatformInstance = false;
+        if ( colourMode == UseColour::No ) {
+            createPlatformInstance = false;
+        }
+
+        if ( colourMode == UseColour::Yes ) {
+            createPlatformInstance = true;
+        }
+
+        if ( colourMode == UseColour::Auto ) {
+            createPlatformInstance =
+#if defined( CATCH_CONFIG_COLOUR_ANSI )
+                PosixColourImpl::useColourOnPlatform()
+#elif defined( CATCH_CONFIG_COLOUR_WINDOWS )
+                Win32ColourImpl::useColourOnPlatform()
+#else
+                NoColourImpl::useColourOnPlatform()
+#endif
+                ;
+        }
+
+        if ( createPlatformInstance ) {
+            return
+#if defined( CATCH_CONFIG_COLOUR_ANSI )
+                Detail::make_unique<PosixColourImpl>();
+#elif defined( CATCH_CONFIG_COLOUR_WINDOWS )
+                Detail::make_unique<Win32ColourImpl>();
+#else
+                Detail::make_unique<NoColourImpl>();
+#endif
+        }
+        return Detail::make_unique<NoColourImpl>();
+    }
+
 
 } // end namespace Catch
 

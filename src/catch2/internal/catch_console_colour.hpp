@@ -64,6 +64,13 @@ namespace Catch {
         friend std::ostream& operator << (std::ostream& os, Colour const&);
     };
 
+    struct ColourImpl {
+        virtual ~ColourImpl(); // = default
+        virtual void use( Colour::Code _colourCode ) = 0;
+    };
+
+    //! Provides ColourImpl based on global config and target compilation platform
+    Detail::unique_ptr<ColourImpl> makeColourImpl();
 
 } // end namespace Catch
 
